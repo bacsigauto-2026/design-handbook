@@ -159,27 +159,38 @@ def render_access_denied():
 def get_sidebar_filters(df):
     st.sidebar.header("🔍 Filters")
     
-    # Project Name
-    projects = ["All"] + sorted(df["project_name"].unique().tolist())
-    selected_project = st.sidebar.selectbox("Project Name", projects)
+    # List of filters: (Label, Column Name)
+    filters_config = [
+        ("Project Name", "project_name"),
+        ("Location", "location"),
+        ("Berth Type", "berth_type"),
+        ("Design Stage", "design_stage"),
+        ("Catalogue", "catalogue"),
+        ("Sub Catalogue", "sub_catalogue"),
+        ("Structural Type", "structural_type"),
+        ("Sub Structural Type", "sub_structural_type"),
+    ]
     
-    # Cascade Filtering (Optional but requested)
-    if selected_project != "All":
-        df = df[df["project_name"] == selected_project]
-    
-    # Catalogue
-    catalogues = ["All"] + sorted(df["catalogue"].dropna().unique().tolist())
-    selected_catalogue = st.sidebar.selectbox("Catalogue", catalogues)
-    
-    if selected_catalogue != "All":
-        df = df[df["catalogue"] == selected_catalogue]
-    
-    # Drawing Name
-    drawings = ["All"] + sorted(df["drawing_name"].unique().tolist())
-    selected_drawing = st.sidebar.selectbox("Drawing Name", drawings)
-    
-    if selected_drawing != "All":
-        df = df[df["drawing_name"] == selected_drawing]
+    for label, col in filters_config:
+        # Check if column exists (handling generic schemas or missing updates)
+        if col in df.columns:
+            # Get unique values, existing in the current filtered df (Cascading effect)
+            items = sorted(df[col].dropna().unique().tolist())
+            options = ["All"] + items
+            
+            # Use unique keys to avoid dup widgets
+            selected = st.sidebar.selectbox(label, options, key=f"filter_{col}")
+            
+            if selected != "All":
+                df = df[df[col] == selected]
+                
+    # Keep Drawing Title as a final search mechanism? 
+    # Logic: After filtering categories, finding a specific drawing is useful.
+    if "drawing_title" in df.columns:
+        drawings = ["All"] + sorted(df["drawing_title"].dropna().unique().tolist())
+        selected_drawing = st.sidebar.selectbox("Drawing Title", drawings, key="filter_drawing_title")
+        if selected_drawing != "All":
+            df = df[df["drawing_title"] == selected_drawing]
         
     return df
 
@@ -205,6 +216,10 @@ def render_main_dashboard():
     # Configure dataframe with selection
     event = st.dataframe(
         filtered_df,
+        column_config={
+            "id": None, # Hide ID column
+            "pdf_link": st.column_config.LinkColumn("PDF Link")
+        },
         use_container_width=True,
         on_select="rerun",
         selection_mode="single-row",
@@ -224,7 +239,7 @@ def render_main_dashboard():
             selected_record = filtered_df.iloc[selected_row_index]
             pdf_link = selected_record.get("pdf_link")
             
-            st.info(f"Viewing: **{selected_record.get('drawing_name')}**")
+            st.info(f"Viewing: **{selected_record.get('drawing_title')}**")
             
             # Check Session Role for Access Control
             user_role = st.session_state.get("role", "pending")
@@ -324,6 +339,77 @@ def render_admin_dashboard():
             
     else:
         st.info("No users found.")
+
+    st.markdown("---")
+    st.subheader("📤 Bulk Data Import")
+    st.write("Upload your Excel file to populate the database.")
+    
+    uploaded_file = st.file_uploader("Choose an Excel file", type=["xlsx", "xls", "csv"])
+    
+    if uploaded_file:
+        try:
+            if uploaded_file.name.endswith('.csv'):
+                df_import = pd.read_csv(uploaded_file)
+            else:
+                df_import = pd.read_excel(uploaded_file)
+                
+            st.write("Preview:")
+            st.dataframe(df_import.head())
+            
+            # Column Mapping (Simple normalization)
+            # We want to map "Project Name" -> "project_name"
+            # And "Drawing Title" -> "drawing_title"
+            
+            # Get current DB columns for validation
+            # We'll just define the expected schema based on the recent update
+            expected_columns = [
+                "project_name", "project_number", "location", "client", "consultant", 
+                "designer", "year", "berth_type", "design_stage", "vessel_type", 
+                "vessel_size", "description", "note", "pdf_folder", "pdf_files", 
+                "pdf_link", "pdf_page", "catalogue", "sub_catalogue", "structural_type", 
+                "sub_structural_type", "drawing_title", "drawing_number", "drawing_rev", 
+                "drawing_date", "drawing_description", "drawing_information"
+            ]
+            
+            # Normalize headers
+            df_import.columns = [c.strip().lower().replace(" ", "_").replace("-", "_") for c in df_import.columns]
+            
+            # Rename specific mismatches if necessary (optional common ones)
+            # e.g. if excel has 'pdf_file' but db has 'pdf_files'
+            
+            # Filter to only columns that exist in DB to avoid errors
+            valid_columns = [c for c in df_import.columns if c in expected_columns]
+            
+            if st.button(f"Import {len(df_import)} rows"):
+                progress_bar = st.progress(0)
+                success_count = 0
+                error_count = 0
+                
+                # Convert to records for insertion
+                # Replace NaN with None for SQL compatibility
+                records = df_import[valid_columns].where(pd.notnull(df_import[valid_columns]), None).to_dict('records')
+                
+                # Batch insert is more efficient, but let's do small batches to show progress or handle errors
+                batch_size = 100
+                total_batches = (len(records) + batch_size - 1) // batch_size
+                
+                for i in range(total_batches):
+                    batch = records[i*batch_size : (i+1)*batch_size]
+                    try:
+                        supabase.table("design_docs").insert(batch).execute()
+                        success_count += len(batch)
+                    except Exception as e:
+                        st.error(f"Error in batch {i}: {e}")
+                        error_count += len(batch)
+                    
+                    progress_bar.progress((i + 1) / total_batches)
+                
+                st.success(f"Import Complete! Successfully imported {success_count} rows.")
+                if error_count > 0:
+                    st.warning(f"Failed to import {error_count} rows.")
+                    
+        except Exception as e:
+            st.error(f"Error processing file: {e}")
 
 # --- Main App Logic ---
 
