@@ -1,5 +1,5 @@
 import streamlit as st
-from supabase import create_client, Client
+from supabase import create_client, Client, ClientOptions
 import pandas as pd
 import time
 import uuid
@@ -26,7 +26,14 @@ except KeyError:
 
 @st.cache_resource
 def get_supabase_client() -> Client:
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
+    # Use PKCE flow for server-side Streamlit apps to handle callbacks securely
+    return create_client(
+        SUPABASE_URL, 
+        SUPABASE_KEY,
+        options=ClientOptions(
+            flow_type="pkce"
+        )
+    )
 
 supabase = get_supabase_client()
 
@@ -39,6 +46,31 @@ if "auth_checked" not in st.session_state:
     st.session_state.auth_checked = False
 
 # --- Helper Functions ---
+
+def handle_auth_callback():
+    """Exchange the auth code for a session if present in URL."""
+    # Check for 'code' in query params
+    query_params = st.query_params
+    if "code" in query_params:
+        try:
+            code = query_params["code"]
+            st.toast("Authenticating...", icon="🔐")
+            
+            # Exchange code for session
+            supabase.auth.exchange_code_for_session({
+                "auth_code": code
+            })
+            
+            # Clear query params and rerun to clean URL
+            st.query_params.clear()
+            st.success("Login successful!")
+            time.sleep(1)
+            st.rerun()
+        except Exception as e:
+            st.error(f"Authentication failed: {e}")
+            # Clear params even on failure to prevent loop
+            st.query_params.clear()
+
 
 def get_user_role(email, user_id=None):
     """Fetch user role from 'users' table or create if not exists."""
@@ -66,26 +98,37 @@ def get_user_role(email, user_id=None):
         st.error(f"Database Error: {e}")
         return None
 
-def login_with_google():
-    """Trigger Google OAuth."""
+
+def login_with_email(email, password):
+    """Sign in with Email and Password."""
     try:
-        # Get the current URL to redirect back to
-        # Note: 'redirect_to' requires site URL config in Supabase
-        
-        # 1. Get the OAuth provider URL
-        data = supabase.auth.sign_in_with_oauth({
-            "provider": "google", 
+        response = supabase.auth.sign_in_with_password({
+            "email": email,
+            "password": password
+        })
+        st.success("Login successful!")
+        time.sleep(1)
+        st.rerun()
+    except Exception as e:
+        st.error(f"Login Error: {e}")
+
+def sign_up_with_email(email, password):
+    """Sign up new user."""
+    try:
+        # Redirect to localhost for email confirmation link to return to
+        response = supabase.auth.sign_up({
+            "email": email,
+            "password": password,
             "options": {
-                "redirect_to": "http://localhost:8501" # Adjust for production
+                "email_redirect_to": "http://localhost:8501"
             }
         })
-        
-        # 2. Show the link/button
-        if data.url:
-            st.markdown(f'<a href="{data.url}" target="_self"><button style="background-color:#4285F4; color:white; padding:10px; border:none; border-radius:5px; cursor:pointer;">Login with Google</button></a>', unsafe_allow_html=True)
-            st.info("Click the button above to sign in. (Requires Supabase Auth Config)")
+        st.success(f"Registration successful! Please check your email ({email}) for an activation link.")
     except Exception as e:
-        st.error(f"Auth Error: {e}")
+        st.error(f"Registration Error: {e}")
+
+# Removed Google Login function as requested
+# def login_with_google(): ...
 
 def check_auth_status():
     """Verify if user is logged in via Supabase Auth."""
@@ -183,7 +226,12 @@ def render_main_dashboard():
             
             st.info(f"Viewing: **{selected_record.get('drawing_name')}**")
             
-            if pdf_link:
+            # Check Session Role for Access Control
+            user_role = st.session_state.get("role", "pending")
+            
+            if user_role == "pending":
+                st.warning("🔒 **Access Restricted**: Detailed drawings require Administrator approval. Please contact support if this persists.")
+            elif pdf_link:
                 # PDF Embedding
                 # Many sites block standard iframe embedding (X-Frame-Options). 
                 # We will use <object> tag which is more standard for PDFs, 
@@ -280,6 +328,9 @@ def render_admin_dashboard():
 # --- Main App Logic ---
 
 def main():
+    # 0. Handle Auth Callback (Must be first)
+    handle_auth_callback()
+
     # 1. Check Login
     user = check_auth_status()
     
@@ -303,7 +354,32 @@ def main():
         # Show Login Screen
         st.title("Design Handbook Login")
         st.write("Please sign in to access the dashboard.")
-        login_with_google()
+        
+        tab1, tab2 = st.tabs(["Log In", "Sign Up"])
+        
+        with tab1:
+            with st.form("login_form"):
+                email = st.text_input("Email")
+                password = st.text_input("Password", type="password")
+                submit_login = st.form_submit_button("Log In")
+                
+                if submit_login:
+                    if email and password:
+                        login_with_email(email, password)
+                    else:
+                        st.error("Please enter email and password.")
+        
+        with tab2:
+            with st.form("signup_form"):
+                new_email = st.text_input("Email")
+                new_password = st.text_input("Password", type="password")
+                submit_signup = st.form_submit_button("Create Account")
+                
+                if submit_signup:
+                    if new_email and new_password:
+                        sign_up_with_email(new_email, new_password)
+                    else:
+                        st.error("Please enter email and password.")
         
         # --- DEBUG / DEMO HELPER ---
         # Since we can't easily click "Login with Google" in this simulated env
